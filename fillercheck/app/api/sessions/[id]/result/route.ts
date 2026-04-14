@@ -1,6 +1,6 @@
 // UC-07: 商談結果（受注/失注）を記録する
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { getDb, ensureSchema } from '@/lib/db';
 
 export async function PATCH(
   req: NextRequest,
@@ -14,16 +14,22 @@ export async function PATCH(
     return NextResponse.json({ error: '無効な商談結果です' }, { status: 400 });
   }
 
+  await ensureSchema();
   const db = getDb();
-  const existing = db.prepare('SELECT meeting_result FROM sessions WHERE id = ?').get(sessionId) as
-    | { meeting_result: string | null }
-    | undefined;
 
-  if (!existing) {
+  const existing = await db.execute({
+    sql: 'SELECT meeting_result FROM sessions WHERE id = ?',
+    args: [sessionId],
+  });
+  if (!existing.rows[0]) {
     return NextResponse.json({ error: '商談が見つかりません' }, { status: 404 });
   }
 
-  db.prepare('UPDATE sessions SET meeting_result = ? WHERE id = ?').run(result, sessionId);
+  const row = existing.rows[0] as unknown as { meeting_result: string | null };
+  await db.execute({
+    sql: 'UPDATE sessions SET meeting_result = ? WHERE id = ?',
+    args: [result, sessionId],
+  });
 
-  return NextResponse.json({ success: true, result, alreadyExisted: existing.meeting_result !== null });
+  return NextResponse.json({ success: true, result, alreadyExisted: row.meeting_result !== null });
 }

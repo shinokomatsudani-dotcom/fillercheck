@@ -1,6 +1,6 @@
 // UC-03 / UC-04 / UC-05
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { getDb, ensureSchema } from '@/lib/db';
 import { calcRate } from '@/lib/analyzer';
 
 export async function GET(
@@ -9,9 +9,14 @@ export async function GET(
 ) {
   const { id } = await params;
   const sessionId = parseInt(id, 10);
+  await ensureSchema();
   const db = getDb();
 
-  const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId) as {
+  const sessionResult = await db.execute({
+    sql: 'SELECT * FROM sessions WHERE id = ?',
+    args: [sessionId],
+  });
+  const session = sessionResult.rows[0] as unknown as {
     id: number; filename: string; uploaded_at: string;
     meeting_result: string | null; total_filler_count: number;
     char_count: number; speakers: string;
@@ -22,19 +27,25 @@ export async function GET(
   const speakers: string[] = JSON.parse(session.speakers || '[]');
 
   // フィラーワード種類別カウント
-  const counts = db.prepare(
-    'SELECT word, count FROM filler_counts WHERE session_id = ? ORDER BY count DESC'
-  ).all(sessionId) as { word: string; count: number }[];
+  const countsResult = await db.execute({
+    sql: 'SELECT word, count FROM filler_counts WHERE session_id = ? ORDER BY count DESC',
+    args: [sessionId],
+  });
+  const counts = countsResult.rows as unknown as { word: string; count: number }[];
 
   // 発言箇所
-  const occurrences = db.prepare(
-    'SELECT word, position, context, occurrence_index, speaker FROM filler_occurrences WHERE session_id = ? ORDER BY position ASC'
-  ).all(sessionId) as { word: string; position: number; context: string; occurrence_index: number; speaker: string | null }[];
+  const occResult = await db.execute({
+    sql: 'SELECT word, position, context, occurrence_index, speaker FROM filler_occurrences WHERE session_id = ? ORDER BY position ASC',
+    args: [sessionId],
+  });
+  const occurrences = occResult.rows as unknown as { word: string; position: number; context: string; occurrence_index: number; speaker: string | null }[];
 
   // 話者別フィラーカウント
-  const speakerCountRows = db.prepare(
-    'SELECT speaker, word, count FROM speaker_filler_counts WHERE session_id = ?'
-  ).all(sessionId) as { speaker: string; word: string; count: number }[];
+  const spkCountResult = await db.execute({
+    sql: 'SELECT speaker, word, count FROM speaker_filler_counts WHERE session_id = ?',
+    args: [sessionId],
+  });
+  const speakerCountRows = spkCountResult.rows as unknown as { speaker: string; word: string; count: number }[];
 
   const speakerCounts: Record<string, { word: string; count: number }[]> = {};
   for (const row of speakerCountRows) {
@@ -46,12 +57,14 @@ export async function GET(
   }
 
   // 話者別文字数
-  const charCountRows = db.prepare(
-    'SELECT speaker, char_count FROM speaker_char_counts WHERE session_id = ?'
-  ).all(sessionId) as { speaker: string; char_count: number }[];
-
+  const charResult = await db.execute({
+    sql: 'SELECT speaker, char_count FROM speaker_char_counts WHERE session_id = ?',
+    args: [sessionId],
+  });
   const speakerCharCounts: Record<string, number> = {};
-  for (const r of charCountRows) speakerCharCounts[r.speaker] = r.char_count;
+  for (const r of charResult.rows as unknown as { speaker: string; char_count: number }[]) {
+    speakerCharCounts[r.speaker] = r.char_count;
+  }
 
   // 話者別正規化レート
   const speakerRates: Record<string, number> = {};
@@ -60,44 +73,53 @@ export async function GET(
     speakerRates[spk] = calcRate(fillers, speakerCharCounts[spk] || 0);
   }
 
-  // 前回比較（UC-05）: meeting_atが取れる場合はそれで比較、なければuploaded_atで比較
-  const currentSession = db.prepare(
-    'SELECT COALESCE(meeting_at, uploaded_at) as sort_at FROM sessions WHERE id = ?'
-  ).get(sessionId) as { sort_at: string } | undefined;
-
-  const prevSession = currentSession ? db.prepare(
-    `SELECT id, total_filler_count, char_count, COALESCE(meeting_at, uploaded_at) as meeting_date
-     FROM sessions
-     WHERE COALESCE(meeting_at, uploaded_at) < ? AND id != ?
-     ORDER BY COALESCE(meeting_at, uploaded_at) DESC LIMIT 1`
-  ).get(currentSession.sort_at, sessionId) as { id: number; total_filler_count: number; char_count: number; meeting_date: string } | undefined : undefined;
+  // 前回比較（UC-05）
+  const currentResult = await db.execute({
+    sql: `SELECT COALESCE(meeting_at, uploaded_at) as sort_at FROM sessions WHERE id = ?`,
+    args: [sessionId],
+  });
+  const currentSession = currentResult.rows[0] as unknown as { sort_at: string } | undefined;
 
   let prevComparison = null;
-  if (prevSession) {
-    const prevCounts = db.prepare(
-      'SELECT word, count FROM filler_counts WHERE session_id = ?'
-    ).all(prevSession.id) as { word: string; count: number }[];
-    const prevCountMap: Record<string, number> = {};
-    for (const c of prevCounts) prevCountMap[c.word] = c.count;
+  if (currentSession) {
+    const prevResult = await db.execute({
+      sql: `SELECT id, total_filler_count, char_count, COALESCE(meeting_at, uploaded_at) as meeting_date
+            FROM sessions
+            WHERE COALESCE(meeting_at, uploaded_at) < ? AND id != ?
+            ORDER BY COALESCE(meeting_at, uploaded_at) DESC LIMIT 1`,
+      args: [currentSession.sort_at, sessionId],
+    });
+    const prevSession = prevResult.rows[0] as unknown as { id: number; total_filler_count: number; char_count: number; meeting_date: string } | undefined;
 
-    const diff      = session.total_filler_count - prevSession.total_filler_count;
-    const rateDiff  = calcRate(session.total_filler_count, session.char_count)
-                    - calcRate(prevSession.total_filler_count, prevSession.char_count);
+    if (prevSession) {
+      const prevCountsResult = await db.execute({
+        sql: 'SELECT word, count FROM filler_counts WHERE session_id = ?',
+        args: [prevSession.id],
+      });
+      const prevCountMap: Record<string, number> = {};
+      for (const c of prevCountsResult.rows as unknown as { word: string; count: number }[]) {
+        prevCountMap[c.word] = c.count;
+      }
 
-    prevComparison = {
-      prevTotal:    prevSession.total_filler_count,
-      prevCharCount: prevSession.char_count,
-      prevRate:     calcRate(prevSession.total_filler_count, prevSession.char_count),
-      prevDate:     prevSession.meeting_date,
-      diff,
-      rateDiff:     Math.round(rateDiff * 10) / 10,
-      wordDiffs: counts.map((c) => ({
-        word: c.word,
-        current: c.count,
-        prev: prevCountMap[c.word] || 0,
-        diff: c.count - (prevCountMap[c.word] || 0),
-      })),
-    };
+      const diff     = session.total_filler_count - prevSession.total_filler_count;
+      const rateDiff = calcRate(session.total_filler_count, session.char_count)
+                     - calcRate(prevSession.total_filler_count, prevSession.char_count);
+
+      prevComparison = {
+        prevTotal:     prevSession.total_filler_count,
+        prevCharCount: prevSession.char_count,
+        prevRate:      calcRate(prevSession.total_filler_count, prevSession.char_count),
+        prevDate:      prevSession.meeting_date,
+        diff,
+        rateDiff:      Math.round(rateDiff * 10) / 10,
+        wordDiffs: counts.map((c) => ({
+          word:    c.word,
+          current: c.count,
+          prev:    prevCountMap[c.word] || 0,
+          diff:    c.count - (prevCountMap[c.word] || 0),
+        })),
+      };
+    }
   }
 
   return NextResponse.json({
@@ -121,12 +143,16 @@ export async function DELETE(
 ) {
   const { id } = await params;
   const sessionId = parseInt(id, 10);
+  await ensureSchema();
   const db = getDb();
 
-  const session = db.prepare('SELECT id FROM sessions WHERE id = ?').get(sessionId);
-  if (!session) return NextResponse.json({ error: '商談が見つかりません' }, { status: 404 });
+  const existing = await db.execute({
+    sql: 'SELECT id FROM sessions WHERE id = ?',
+    args: [sessionId],
+  });
+  if (!existing.rows[0]) return NextResponse.json({ error: '商談が見つかりません' }, { status: 404 });
 
-  db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+  await db.execute({ sql: 'DELETE FROM sessions WHERE id = ?', args: [sessionId] });
 
   return NextResponse.json({ ok: true });
 }

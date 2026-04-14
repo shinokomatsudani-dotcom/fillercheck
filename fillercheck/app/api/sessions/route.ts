@@ -1,16 +1,18 @@
 // UC-02 / UC-06
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { getDb, ensureSchema } from '@/lib/db';
 import { calcRate } from '@/lib/analyzer';
 
 export async function GET(req: NextRequest) {
+  await ensureSchema();
   const db = getDb();
   const speaker = req.nextUrl.searchParams.get('speaker') || null;
 
-  const rawSessions = db.prepare(
+  const rawResult = await db.execute(
     `SELECT id, filename, uploaded_at, meeting_at, meeting_result, total_filler_count, char_count, speakers
      FROM sessions ORDER BY COALESCE(meeting_at, uploaded_at) DESC`
-  ).all() as {
+  );
+  const rawSessions = rawResult.rows as unknown as {
     id: number; filename: string; uploaded_at: string; meeting_at: string | null;
     meeting_result: string | null; total_filler_count: number;
     char_count: number; speakers: string;
@@ -27,15 +29,21 @@ export async function GET(req: NextRequest) {
   let speakerFillerTotals: Record<number, number> = {};
   let speakerCharTotals: Record<number, number> = {};
   if (speaker) {
-    const fillerRows = db.prepare(
-      `SELECT session_id, SUM(count) as total FROM speaker_filler_counts WHERE speaker = ? GROUP BY session_id`
-    ).all(speaker) as { session_id: number; total: number }[];
-    for (const r of fillerRows) speakerFillerTotals[r.session_id] = r.total;
+    const fillerResult = await db.execute({
+      sql: `SELECT session_id, SUM(count) as total FROM speaker_filler_counts WHERE speaker = ? GROUP BY session_id`,
+      args: [speaker],
+    });
+    for (const r of fillerResult.rows as unknown as { session_id: number; total: number }[]) {
+      speakerFillerTotals[r.session_id] = r.total;
+    }
 
-    const charRows = db.prepare(
-      `SELECT session_id, char_count FROM speaker_char_counts WHERE speaker = ?`
-    ).all(speaker) as { session_id: number; char_count: number }[];
-    for (const r of charRows) speakerCharTotals[r.session_id] = r.char_count;
+    const charResult = await db.execute({
+      sql: `SELECT session_id, char_count FROM speaker_char_counts WHERE speaker = ?`,
+      args: [speaker],
+    });
+    for (const r of charResult.rows as unknown as { session_id: number; char_count: number }[]) {
+      speakerCharTotals[r.session_id] = r.char_count;
+    }
   }
 
   const sessions = rawSessions
@@ -56,41 +64,5 @@ export async function GET(req: NextRequest) {
       };
     });
 
-  const weeklyData = computeWeeklyData(sessions);
-
-  return NextResponse.json({ sessions, weeklyData, allSpeakers });
-}
-
-function computeWeeklyData(
-  sessions: { uploaded_at: string; meeting_at: string | null; total_filler_count: number; char_count: number }[]
-) {
-  const weekMap: Record<string, { fillers: number[]; chars: number }> = {};
-
-  for (const s of sessions) {
-    const week = getWeekLabel(new Date(s.meeting_at ?? s.uploaded_at));
-    if (!weekMap[week]) weekMap[week] = { fillers: [], chars: 0 };
-    weekMap[week].fillers.push(s.total_filler_count);
-    weekMap[week].chars += s.char_count;
-  }
-
-  return Object.entries(weekMap)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([week, { fillers, chars }]) => {
-      const totalFillers = fillers.reduce((a, b) => a + b, 0);
-      return {
-        week,
-        rate: calcRate(totalFillers, chars),          // 週単位の正規化レート
-        avg: Math.round(totalFillers / fillers.length), // 生の平均（参考値）
-        sessions: fillers.length,
-      };
-    });
-}
-
-function getWeekLabel(date: Date): string {
-  const year = date.getFullYear();
-  const startOfYear = new Date(year, 0, 1);
-  const weekNum = Math.ceil(
-    ((date.getTime() - startOfYear.getTime()) / 86400000 + startOfYear.getDay() + 1) / 7
-  );
-  return `${year}-W${String(weekNum).padStart(2, '0')}`;
+  return NextResponse.json({ sessions, allSpeakers });
 }

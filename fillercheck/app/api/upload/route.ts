@@ -1,6 +1,6 @@
 // UC-01: 文字起こしファイルをアップロードする
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { getDb, ensureSchema } from '@/lib/db';
 import { parseSegmentsFromHtml, parseSegmentsFromText, analyzeSegments } from '@/lib/analyzer';
 import mammoth from 'mammoth';
 
@@ -11,7 +11,6 @@ function parseMeetingDateFromFilename(filename: string): string | null {
   const m = filename.match(/(\d{4})_(\d{2})_(\d{2})\s+(\d{2})_(\d{2})\s+JST/);
   if (!m) return null;
   const [, year, month, day, hour, minute] = m;
-  // JSTはUTC+9なので9時間引いてUTCに変換
   const date = new Date(`${year}-${month}-${day}T${hour}:${minute}:00+09:00`);
   return isNaN(date.getTime()) ? null : date.toISOString();
 }
@@ -53,45 +52,49 @@ export async function POST(req: NextRequest) {
     analysis = analyzeSegments(parseSegmentsFromHtml(htmlResult.value));
   }
 
+  await ensureSchema();
   const db = getDb();
   const now = new Date().toISOString();
   const meetingAt = parseMeetingDateFromFilename(file.name);
 
-  const sessionResult = db.prepare(
-    'INSERT INTO sessions (filename, uploaded_at, meeting_at, total_filler_count, char_count, speakers) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(file.name, now, meetingAt, analysis.total, analysis.charCount, JSON.stringify(analysis.speakers));
-  const sessionId = sessionResult.lastInsertRowid as number;
+  const sessionResult = await db.execute({
+    sql: 'INSERT INTO sessions (filename, uploaded_at, meeting_at, total_filler_count, char_count, speakers) VALUES (?, ?, ?, ?, ?, ?)',
+    args: [file.name, now, meetingAt, analysis.total, analysis.charCount, JSON.stringify(analysis.speakers)],
+  });
+  const sessionId = Number(sessionResult.lastInsertRowid);
 
   // フィラーワード種類別カウント
-  const countStmt = db.prepare('INSERT INTO filler_counts (session_id, word, count) VALUES (?, ?, ?)');
   for (const [word, count] of Object.entries(analysis.counts)) {
-    countStmt.run(sessionId, word, count);
+    await db.execute({
+      sql: 'INSERT INTO filler_counts (session_id, word, count) VALUES (?, ?, ?)',
+      args: [sessionId, word, count],
+    });
   }
 
   // 発言箇所（speaker付き）
-  const occStmt = db.prepare(
-    'INSERT INTO filler_occurrences (session_id, word, position, context, occurrence_index, speaker) VALUES (?, ?, ?, ?, ?, ?)'
-  );
   for (const occ of analysis.occurrences) {
-    occStmt.run(sessionId, occ.word, occ.position, occ.context, occ.occurrenceIndex, occ.speaker ?? null);
+    await db.execute({
+      sql: 'INSERT INTO filler_occurrences (session_id, word, position, context, occurrence_index, speaker) VALUES (?, ?, ?, ?, ?, ?)',
+      args: [sessionId, occ.word, occ.position, occ.context, occ.occurrenceIndex, occ.speaker ?? null],
+    });
   }
 
   // 話者別フィラーカウント
-  const speakerCountStmt = db.prepare(
-    'INSERT INTO speaker_filler_counts (session_id, speaker, word, count) VALUES (?, ?, ?, ?)'
-  );
   for (const [speaker, wordCounts] of Object.entries(analysis.speakerCounts)) {
     for (const [word, count] of Object.entries(wordCounts)) {
-      speakerCountStmt.run(sessionId, speaker, word, count);
+      await db.execute({
+        sql: 'INSERT INTO speaker_filler_counts (session_id, speaker, word, count) VALUES (?, ?, ?, ?)',
+        args: [sessionId, speaker, word, count],
+      });
     }
   }
 
   // 話者別文字数
-  const charCountStmt = db.prepare(
-    'INSERT INTO speaker_char_counts (session_id, speaker, char_count) VALUES (?, ?, ?)'
-  );
   for (const [speaker, chars] of Object.entries(analysis.speakerCharCounts)) {
-    charCountStmt.run(sessionId, speaker, chars);
+    await db.execute({
+      sql: 'INSERT INTO speaker_char_counts (session_id, speaker, char_count) VALUES (?, ?, ?)',
+      args: [sessionId, speaker, chars],
+    });
   }
 
   return NextResponse.json({

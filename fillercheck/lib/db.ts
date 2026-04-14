@@ -1,22 +1,24 @@
-import Database from 'better-sqlite3';
-import path from 'path';
+import { createClient, type Client } from '@libsql/client';
 
-const DB_PATH = path.join(process.cwd(), 'fillercheck.db');
+const TURSO_URL = process.env.TURSO_URL ?? 'file:fillercheck.db';
+const TURSO_AUTH_TOKEN = process.env.TURSO_AUTH_TOKEN ?? '';
 
-let db: Database.Database;
+let _client: Client | null = null;
+let _schemaReady = false;
 
-export function getDb(): Database.Database {
-  if (!db) {
-    db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
-    initSchema(db);
+export function getDb(): Client {
+  if (!_client) {
+    _client = createClient({ url: TURSO_URL, authToken: TURSO_AUTH_TOKEN });
   }
-  return db;
+  return _client;
 }
 
-function initSchema(db: Database.Database) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS sessions (
+export async function ensureSchema(): Promise<void> {
+  if (_schemaReady) return;
+  const db = getDb();
+
+  const tables = [
+    `CREATE TABLE IF NOT EXISTS sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       filename TEXT NOT NULL,
       uploaded_at TEXT NOT NULL,
@@ -25,16 +27,14 @@ function initSchema(db: Database.Database) {
       total_filler_count INTEGER DEFAULT 0,
       char_count INTEGER DEFAULT 0,
       speakers TEXT DEFAULT '[]'
-    );
-
-    CREATE TABLE IF NOT EXISTS filler_counts (
+    )`,
+    `CREATE TABLE IF NOT EXISTS filler_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
       word TEXT NOT NULL,
       count INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS filler_occurrences (
+    )`,
+    `CREATE TABLE IF NOT EXISTS filler_occurrences (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
       word TEXT NOT NULL,
@@ -42,30 +42,7 @@ function initSchema(db: Database.Database) {
       context TEXT NOT NULL,
       occurrence_index INTEGER NOT NULL,
       speaker TEXT DEFAULT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS speaker_filler_counts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-      speaker TEXT NOT NULL,
-      word TEXT NOT NULL,
-      count INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS speaker_char_counts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-      speaker TEXT NOT NULL,
-      char_count INTEGER NOT NULL
-    );
-  `);
-
-  // 既存DBへのマイグレーション
-  const migrations = [
-    `ALTER TABLE sessions ADD COLUMN speakers TEXT DEFAULT '[]'`,
-    `ALTER TABLE sessions ADD COLUMN char_count INTEGER DEFAULT 0`,
-    `ALTER TABLE sessions ADD COLUMN meeting_at TEXT DEFAULT NULL`,
-    `ALTER TABLE filler_occurrences ADD COLUMN speaker TEXT DEFAULT NULL`,
+    )`,
     `CREATE TABLE IF NOT EXISTS speaker_filler_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -80,7 +57,21 @@ function initSchema(db: Database.Database) {
       char_count INTEGER NOT NULL
     )`,
   ];
-  for (const sql of migrations) {
-    try { db.exec(sql); } catch { /* already exists */ }
+
+  for (const sql of tables) {
+    await db.execute(sql);
   }
+
+  // 既存DBへのマイグレーション
+  const migrations = [
+    `ALTER TABLE sessions ADD COLUMN speakers TEXT DEFAULT '[]'`,
+    `ALTER TABLE sessions ADD COLUMN char_count INTEGER DEFAULT 0`,
+    `ALTER TABLE sessions ADD COLUMN meeting_at TEXT DEFAULT NULL`,
+    `ALTER TABLE filler_occurrences ADD COLUMN speaker TEXT DEFAULT NULL`,
+  ];
+  for (const sql of migrations) {
+    try { await db.execute(sql); } catch { /* already exists */ }
+  }
+
+  _schemaReady = true;
 }
