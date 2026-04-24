@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
+import { UserButton } from '@clerk/nextjs';
 import {
   LineChart,
   Line,
@@ -174,6 +175,7 @@ export default function Home() {
               </button>
             ) : null}
           </div>
+          <UserButton />
         </div>
       </header>
 

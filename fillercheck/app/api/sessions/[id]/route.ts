@@ -1,5 +1,6 @@
 // UC-03 / UC-04 / UC-05
 import { NextRequest, NextResponse } from 'next/server';
+import { auth } from '@clerk/nextjs/server';
 import { getDb, ensureSchema } from '@/lib/db';
 import { calcRate } from '@/lib/analyzer';
 
@@ -7,14 +8,17 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const { userId } = await auth();
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
   const { id } = await params;
   const sessionId = parseInt(id, 10);
   await ensureSchema();
   const db = getDb();
 
   const sessionResult = await db.execute({
-    sql: 'SELECT * FROM sessions WHERE id = ?',
-    args: [sessionId],
+    sql: 'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+    args: [sessionId, userId],
   });
   const session = sessionResult.rows[0] as unknown as {
     id: number; filename: string; uploaded_at: string;
@@ -26,29 +30,24 @@ export async function GET(
 
   const speakers: string[] = JSON.parse(session.speakers || '[]');
 
-  // フィラーワード種類別カウント
   const countsResult = await db.execute({
     sql: 'SELECT word, count FROM filler_counts WHERE session_id = ? ORDER BY count DESC',
     args: [sessionId],
   });
   const counts = countsResult.rows as unknown as { word: string; count: number }[];
 
-  // 発言箇所
   const occResult = await db.execute({
     sql: 'SELECT word, position, context, occurrence_index, speaker FROM filler_occurrences WHERE session_id = ? ORDER BY position ASC',
     args: [sessionId],
   });
   const occurrences = occResult.rows as unknown as { word: string; position: number; context: string; occurrence_index: number; speaker: string | null }[];
 
-  // 話者別フィラーカウント
   const spkCountResult = await db.execute({
     sql: 'SELECT speaker, word, count FROM speaker_filler_counts WHERE session_id = ?',
     args: [sessionId],
   });
-  const speakerCountRows = spkCountResult.rows as unknown as { speaker: string; word: string; count: number }[];
-
   const speakerCounts: Record<string, { word: string; count: number }[]> = {};
-  for (const row of speakerCountRows) {
+  for (const row of spkCountResult.rows as unknown as { speaker: string; word: string; count: number }[]) {
     if (!speakerCounts[row.speaker]) speakerCounts[row.speaker] = [];
     speakerCounts[row.speaker].push({ word: row.word, count: row.count });
   }
@@ -56,7 +55,6 @@ export async function GET(
     speakerCounts[spk].sort((a, b) => b.count - a.count);
   }
 
-  // 話者別文字数
   const charResult = await db.execute({
     sql: 'SELECT speaker, char_count FROM speaker_char_counts WHERE session_id = ?',
     args: [sessionId],
@@ -66,17 +64,15 @@ export async function GET(
     speakerCharCounts[r.speaker] = r.char_count;
   }
 
-  // 話者別正規化レート
   const speakerRates: Record<string, number> = {};
   for (const spk of speakers) {
     const fillers = (speakerCounts[spk] || []).reduce((s, c) => s + c.count, 0);
     speakerRates[spk] = calcRate(fillers, speakerCharCounts[spk] || 0);
   }
 
-  // 前回比較（UC-05）
   const currentResult = await db.execute({
-    sql: `SELECT COALESCE(meeting_at, uploaded_at) as sort_at FROM sessions WHERE id = ?`,
-    args: [sessionId],
+    sql: `SELECT COALESCE(meeting_at, uploaded_at) as sort_at FROM sessions WHERE id = ? AND user_id = ?`,
+    args: [sessionId, userId],
   });
   const currentSession = currentResult.rows[0] as unknown as { sort_at: string } | undefined;
 
@@ -85,9 +81,9 @@ export async function GET(
     const prevResult = await db.execute({
       sql: `SELECT id, total_filler_count, char_count, COALESCE(meeting_at, uploaded_at) as meeting_date
             FROM sessions
-            WHERE COALESCE(meeting_at, uploaded_at) < ? AND id != ?
+            WHERE COALESCE(meeting_at, uploaded_at) < ? AND id != ? AND user_id = ?
             ORDER BY COALESCE(meeting_at, uploaded_at) DESC LIMIT 1`,
-      args: [currentSession.sort_at, sessionId],
+      args: [currentSession.sort_at, sessionId, userId],
     });
     const prevSession = prevResult.rows[0] as unknown as { id: number; total_filler_count: number; char_count: number; meeting_date: string } | undefined;
 
@@ -123,10 +119,7 @@ export async function GET(
   }
 
   return NextResponse.json({
-    session: {
-      ...session,
-      rate: calcRate(session.total_filler_count, session.char_count),
-    },
+    session: { ...session, rate: calcRate(session.total_filler_count, session.char_count) },
     counts,
     occurrences,
     speakers,
@@ -141,14 +134,17 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const { userId } = await auth();
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
   const { id } = await params;
   const sessionId = parseInt(id, 10);
   await ensureSchema();
   const db = getDb();
 
   const existing = await db.execute({
-    sql: 'SELECT id FROM sessions WHERE id = ?',
-    args: [sessionId],
+    sql: 'SELECT id FROM sessions WHERE id = ? AND user_id = ?',
+    args: [sessionId, userId],
   });
   if (!existing.rows[0]) return NextResponse.json({ error: '商談が見つかりません' }, { status: 404 });
 

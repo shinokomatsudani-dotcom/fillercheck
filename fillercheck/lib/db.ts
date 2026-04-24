@@ -26,7 +26,8 @@ export async function ensureSchema(): Promise<void> {
       meeting_result TEXT CHECK(meeting_result IN ('won', 'lost', 'ongoing')) DEFAULT NULL,
       total_filler_count INTEGER DEFAULT 0,
       char_count INTEGER DEFAULT 0,
-      speakers TEXT DEFAULT '[]'
+      speakers TEXT DEFAULT '[]',
+      user_id TEXT DEFAULT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS filler_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,6 +69,7 @@ export async function ensureSchema(): Promise<void> {
     `ALTER TABLE sessions ADD COLUMN char_count INTEGER DEFAULT 0`,
     `ALTER TABLE sessions ADD COLUMN meeting_at TEXT DEFAULT NULL`,
     `ALTER TABLE filler_occurrences ADD COLUMN speaker TEXT DEFAULT NULL`,
+    `ALTER TABLE sessions ADD COLUMN user_id TEXT DEFAULT NULL`,
   ];
   for (const sql of migrations) {
     try { await db.execute(sql); } catch { /* already exists */ }

@@ -1,12 +1,12 @@
 // UC-01: 文字起こしファイルをアップロードする
 import { NextRequest, NextResponse } from 'next/server';
+import { auth } from '@clerk/nextjs/server';
 import { getDb, ensureSchema } from '@/lib/db';
 import { parseSegmentsFromHtml, parseSegmentsFromText, analyzeSegments } from '@/lib/analyzer';
 import mammoth from 'mammoth';
 
 const ALLOWED_EXTS = ['.txt', '.docx'];
 
-// ファイル名から "yyyy_mm_dd hh_mm JST" パターンを抽出してISO文字列に変換
 function parseMeetingDateFromFilename(filename: string): string | null {
   const m = filename.match(/(\d{4})_(\d{2})_(\d{2})\s+(\d{2})_(\d{2})\s+JST/);
   if (!m) return null;
@@ -16,6 +16,9 @@ function parseMeetingDateFromFilename(filename: string): string | null {
 }
 
 export async function POST(req: NextRequest) {
+  const { userId } = await auth();
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
   const formData = await req.formData();
   const file = formData.get('file') as File | null;
 
@@ -58,12 +61,11 @@ export async function POST(req: NextRequest) {
   const meetingAt = parseMeetingDateFromFilename(file.name);
 
   const sessionResult = await db.execute({
-    sql: 'INSERT INTO sessions (filename, uploaded_at, meeting_at, total_filler_count, char_count, speakers) VALUES (?, ?, ?, ?, ?, ?)',
-    args: [file.name, now, meetingAt, analysis.total, analysis.charCount, JSON.stringify(analysis.speakers)],
+    sql: 'INSERT INTO sessions (filename, uploaded_at, meeting_at, total_filler_count, char_count, speakers, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    args: [file.name, now, meetingAt, analysis.total, analysis.charCount, JSON.stringify(analysis.speakers), userId],
   });
   const sessionId = Number(sessionResult.lastInsertRowid);
 
-  // フィラーワード種類別カウント
   for (const [word, count] of Object.entries(analysis.counts)) {
     await db.execute({
       sql: 'INSERT INTO filler_counts (session_id, word, count) VALUES (?, ?, ?)',
@@ -71,7 +73,6 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // 発言箇所（speaker付き）
   for (const occ of analysis.occurrences) {
     await db.execute({
       sql: 'INSERT INTO filler_occurrences (session_id, word, position, context, occurrence_index, speaker) VALUES (?, ?, ?, ?, ?, ?)',
@@ -79,7 +80,6 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // 話者別フィラーカウント
   for (const [speaker, wordCounts] of Object.entries(analysis.speakerCounts)) {
     for (const [word, count] of Object.entries(wordCounts)) {
       await db.execute({
@@ -89,7 +89,6 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 話者別文字数
   for (const [speaker, chars] of Object.entries(analysis.speakerCharCounts)) {
     await db.execute({
       sql: 'INSERT INTO speaker_char_counts (session_id, speaker, char_count) VALUES (?, ?, ?)',

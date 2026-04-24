@@ -1,11 +1,15 @@
 // UC-07: 商談結果（受注/失注）を記録する
 import { NextRequest, NextResponse } from 'next/server';
+import { auth } from '@clerk/nextjs/server';
 import { getDb, ensureSchema } from '@/lib/db';
 
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const { userId } = await auth();
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
   const { id } = await params;
   const sessionId = parseInt(id, 10);
   const { result } = await req.json() as { result: 'won' | 'lost' | 'ongoing' };
@@ -18,8 +22,8 @@ export async function PATCH(
   const db = getDb();
 
   const existing = await db.execute({
-    sql: 'SELECT meeting_result FROM sessions WHERE id = ?',
-    args: [sessionId],
+    sql: 'SELECT meeting_result FROM sessions WHERE id = ? AND user_id = ?',
+    args: [sessionId, userId],
   });
   if (!existing.rows[0]) {
     return NextResponse.json({ error: '商談が見つかりません' }, { status: 404 });
